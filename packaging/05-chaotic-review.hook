@@ -1,0 +1,17 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Reviewing unapproved Chaotic-AUR package changes...
+When = PreTransaction
+Exec = /usr/local/bin/chaotic-review hook
+Depends = expac
+Depends = python
+Depends = libarchive
+Depends = util-linux
+NeedsTargets
+AbortOnFail
+NetworkAccess = allowed

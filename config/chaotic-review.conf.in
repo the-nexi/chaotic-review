@@ -1,0 +1,6 @@
+[chaotic-review]
+review_user = @REVIEW_USER@
+state_dir = /var/lib/chaotic-review
+gitlab_project = 54867625
+gitlab_api = https://gitlab.com/api/v4
+pacman_config = /etc/pacman.conf
