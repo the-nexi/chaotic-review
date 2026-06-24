@@ -48,6 +48,9 @@ The ALPM hook explicitly recovers the invoking terminal from its process
 ancestry because `NeedsTargets` replaces hook stdin and some pacman frontends
 run hooks without a conventional controlling `/dev/tty`.
 
+Unified diffs are rendered with colored headers, hunks, additions, and removals
+through `less -R`.
+
 ## Commands
 
 ```sh

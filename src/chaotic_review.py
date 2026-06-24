@@ -32,10 +32,16 @@ DEFAULT_STATE = Path("/var/lib/chaotic-review")
 DEFAULT_PROJECT = "54867625"
 DEFAULT_API = "https://gitlab.com/api/v4"
 REPO = "chaotic-aur"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 MAX_SOURCE_ARCHIVE = 20 * 1024 * 1024
 MAX_TEXT_FILE = 2 * 1024 * 1024
 PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+:-]+$")
+ANSI_RESET = "\x1b[0m"
+ANSI_BOLD_CYAN = "\x1b[1;36m"
+ANSI_CYAN = "\x1b[36m"
+ANSI_GREEN = "\x1b[32m"
+ANSI_RED = "\x1b[31m"
+ANSI_YELLOW = "\x1b[33m"
 
 
 class ReviewError(RuntimeError):
@@ -351,9 +357,25 @@ class Pacman:
 
 
 def unified(old: Iterable[str], new: Iterable[str], old_name: str, new_name: str) -> str:
-    return "".join(
-        difflib.unified_diff(list(old), list(new), fromfile=old_name, tofile=new_name, lineterm="\n")
-    )
+    output: list[str] = []
+    for line in difflib.unified_diff(
+        list(old), list(new), fromfile=old_name, tofile=new_name, lineterm="\n"
+    ):
+        if line.startswith(("---", "+++")):
+            color = ANSI_BOLD_CYAN
+        elif line.startswith("@@"):
+            color = ANSI_CYAN
+        elif line.startswith("+"):
+            color = ANSI_GREEN
+        elif line.startswith("-"):
+            color = ANSI_RED
+        else:
+            output.append(line)
+            continue
+        ending = "\n" if line.endswith("\n") else ""
+        content = line[:-1] if ending else line
+        output.append(f"{color}{content}{ANSI_RESET}{ending}")
+    return "".join(output)
 
 
 def source_diff(old: dict | None, new: dict) -> str:
@@ -378,8 +400,9 @@ def source_diff(old: dict | None, new: dict) -> str:
             )
         else:
             output.append(
-                f"binary {name}: {before.get('sha256') if before else '<absent>'} -> "
-                f"{after.get('sha256') if after else '<absent>'}\n"
+                f"{ANSI_YELLOW}binary {name}: "
+                f"{before.get('sha256') if before else '<absent>'} -> "
+                f"{after.get('sha256') if after else '<absent>'}{ANSI_RESET}\n"
             )
     return "".join(output) or "(no recipe file changes since the reviewed baseline)\n"
 

@@ -16,6 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from chaotic_review import (  # noqa: E402
+    ANSI_BOLD_CYAN,
+    ANSI_GREEN,
+    ANSI_RED,
     Config,
     ReviewError,
     Reviewer,
@@ -125,6 +128,9 @@ class ReviewTests(unittest.TestCase):
         difference = source_diff(old, new)
         self.assertIn("-pkgver=1", difference)
         self.assertIn("+pkgver=2", difference)
+        self.assertIn(f"{ANSI_RED}-pkgver=1", difference)
+        self.assertIn(f"{ANSI_GREEN}+pkgver=2", difference)
+        self.assertIn(ANSI_BOLD_CYAN, difference)
 
     def test_terminal_can_be_reopened_from_an_inherited_pty_descriptor(self):
         master, slave = pty.openpty()
