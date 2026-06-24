@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -31,7 +32,7 @@ DEFAULT_STATE = Path("/var/lib/chaotic-review")
 DEFAULT_PROJECT = "54867625"
 DEFAULT_API = "https://gitlab.com/api/v4"
 REPO = "chaotic-aur"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MAX_SOURCE_ARCHIVE = 20 * 1024 * 1024
 MAX_TEXT_FILE = 2 * 1024 * 1024
 PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9@._+:-]+$")
@@ -112,6 +113,52 @@ def read_json(path: Path) -> dict | None:
             return json.load(stream)
     except FileNotFoundError:
         return None
+
+
+def terminal_candidates(start_pid: int | None = None) -> list[str]:
+    """Return /dev/tty followed by stdio descriptors from this process ancestry."""
+    candidates = ["/dev/tty"]
+    pid = start_pid or os.getpid()
+    visited: set[int] = set()
+    while pid > 1 and pid not in visited and len(visited) < 16:
+        visited.add(pid)
+        candidates.extend(f"/proc/{pid}/fd/{fd}" for fd in (0, 1, 2))
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+            parent_line = next(line for line in status.splitlines() if line.startswith("PPid:"))
+            pid = int(parent_line.split()[1])
+        except (OSError, StopIteration, ValueError):
+            break
+    return candidates
+
+
+def open_review_terminal(review_user: str, candidates: Iterable[str] | None = None):
+    """Open a terminal explicitly, even when an ALPM hook has no controlling TTY."""
+    try:
+        review_uid = pwd.getpwnam(review_user).pw_uid
+    except KeyError as exc:
+        raise ReviewError(f"configured review user does not exist: {review_user}") from exc
+    for candidate in candidates or terminal_candidates():
+        try:
+            descriptor = os.open(candidate, os.O_RDWR | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError:
+            continue
+        try:
+            metadata = os.fstat(descriptor)
+            if not os.isatty(descriptor) or metadata.st_uid not in {0, review_uid}:
+                os.close(descriptor)
+                continue
+            raw_terminal = io.FileIO(descriptor, mode="r+", closefd=True)
+            return io.TextIOWrapper(
+                raw_terminal, encoding="utf-8", line_buffering=True, write_through=True
+            )
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+    raise ReviewError("no interactive terminal found in the hook process ancestry")
 
 
 def sha256_file(path: Path) -> str:
@@ -410,15 +457,16 @@ class Reviewer:
         os.chmod(self.sources_dir, 0o755)
 
     def _pager(self, report: str) -> None:
-        if not Path("/dev/tty").exists():
-            raise ReviewError("no controlling terminal available for review")
         fd, path = tempfile.mkstemp(prefix="chaotic-review-", suffix=".diff")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(report)
             os.chmod(path, 0o644)
             command = ["/usr/bin/runuser", "-u", self.config.review_user, "--", "/usr/bin/less", "-R", path]
-            result = subprocess.run(command)
+            with open_review_terminal(self.config.review_user) as terminal:
+                result = subprocess.run(
+                    command, stdin=terminal, stdout=terminal, stderr=terminal
+                )
             if result.returncode:
                 raise ReviewError(f"pager exited with status {result.returncode}")
         finally:
@@ -431,12 +479,9 @@ class Reviewer:
             if override
             else "Type YES to approve all exact candidate artifact hashes: "
         )
-        try:
-            with open("/dev/tty", "r+", encoding="utf-8", buffering=1) as tty:
-                tty.write(explanation)
-                answer = tty.readline().strip()
-        except OSError as exc:
-            raise ReviewError("no controlling terminal available for approval") from exc
+        with open_review_terminal(self.config.review_user) as tty:
+            tty.write(explanation)
+            answer = tty.readline().strip()
         return answer == expected
 
     def bootstrap(self, force: bool = False) -> tuple[int, list[str]]:

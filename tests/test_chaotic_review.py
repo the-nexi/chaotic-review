@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import pwd
+import pty
 import stat
 import sys
 import tarfile
@@ -17,6 +20,7 @@ from chaotic_review import (  # noqa: E402
     ReviewError,
     Reviewer,
     SyncPackage,
+    open_review_terminal,
     package_record,
     source_diff,
 )
@@ -121,6 +125,59 @@ class ReviewTests(unittest.TestCase):
         difference = source_diff(old, new)
         self.assertIn("-pkgver=1", difference)
         self.assertIn("+pkgver=2", difference)
+
+    def test_terminal_can_be_reopened_from_an_inherited_pty_descriptor(self):
+        master, slave = pty.openpty()
+        try:
+            user = pwd.getpwuid(os.getuid()).pw_name
+            candidate = f"/proc/{os.getpid()}/fd/{slave}"
+            with open_review_terminal(user, [candidate]) as terminal:
+                terminal.write("terminal-probe\n")
+            self.assertIn(b"terminal-probe", os.read(master, 1024))
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_terminal_lookup_fails_without_a_tty(self):
+        user = pwd.getpwuid(os.getuid()).pw_name
+        with self.assertRaisesRegex(ReviewError, "process ancestry"):
+            open_review_terminal(user, ["/dev/null"])
+
+    def test_terminal_is_recovered_after_controlling_tty_is_detached(self):
+        master, slave = pty.openpty()
+        child = os.fork()
+        if child == 0:
+            try:
+                os.setsid()
+                null = os.open("/dev/null", os.O_RDONLY)
+                os.dup2(null, 0)
+                os.dup2(slave, 1)
+                os.dup2(slave, 2)
+                os.close(null)
+                os.close(master)
+                os.close(slave)
+                user = pwd.getpwuid(os.getuid()).pw_name
+                with open_review_terminal(user) as terminal:
+                    terminal.write("detached-terminal-recovered\n")
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        os.close(slave)
+        output = bytearray()
+        try:
+            while True:
+                try:
+                    chunk = os.read(master, 1024)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+        finally:
+            os.close(master)
+        _, status = os.waitpid(child, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+        self.assertIn(b"detached-terminal-recovered", output)
 
     def test_review_batch_approval_and_exact_hash_cache(self):
         one = self.fixture("one", "shared", "2-1")

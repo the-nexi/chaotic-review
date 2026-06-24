@@ -44,6 +44,10 @@ Quit the report pager with `q`, then type `YES` to approve the displayed exact
 artifacts. If source provenance is unavailable, the explicit response is
 `OVERRIDE`.
 
+The ALPM hook explicitly recovers the invoking terminal from its process
+ancestry because `NeedsTargets` replaces hook stdin and some pacman frontends
+run hooks without a conventional controlling `/dev/tty`.
+
 ## Commands
 
 ```sh
