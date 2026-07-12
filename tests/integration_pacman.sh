@@ -63,7 +63,7 @@ Target = *
 [Action]
 Description = Integration-test Chaotic review gate
 When = PreTransaction
-Exec = /usr/bin/python3 $source_dir/chaotic_review.py --config $work/review.conf hook
+Exec = /usr/bin/env PYTHONPATH=$source_dir /usr/bin/python3 -m chaotic_review --config $work/review.conf hook
 NeedsTargets
 AbortOnFail
 NetworkAccess = allowed
@@ -79,12 +79,15 @@ if "${as_root[@]}" pacman --config "$work/pacman.conf" -S chaotic-review-fixture
 fi
 
 # Seed approval for the exact repository artifact, then the real ALPM hook must pass.
-python3 - "$package" "$work/state" <<PY
+PYTHONPATH="$source_dir" python3 - "$package" "$work/state" <<PY
 import json, pathlib, sys
 sys.path.insert(0, "$source_dir")
 from chaotic_review import package_record
 record = package_record(pathlib.Path(sys.argv[1]))
-record.update({"repo": "chaotic-aur", "approval": "integration-fixture"})
+record.update({
+    "repo": "chaotic-aur",
+    "approval": "integration-fixture",
+})
 path = pathlib.Path(sys.argv[2]) / "packages" / "chaotic-review-fixture.json"
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(record))

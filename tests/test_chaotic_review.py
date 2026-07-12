@@ -27,13 +27,25 @@ from chaotic_review import (  # noqa: E402
     package_record,
     source_diff,
 )
+from chaotic_review.diff import (  # noqa: E402
+    sanitize_untrusted,
+    validate_recipe_path,
+)
+from chaotic_review.runtime import resolve_review_user  # noqa: E402
 
 
-def make_package(path: Path, name: str, base: str, version: str, files: list[str]) -> str:
+def make_package(
+    path: Path,
+    name: str,
+    base: str,
+    version: str,
+    files: list[str],
+    pkgbuild_hash: str = "deadbeef",
+) -> str:
     pkginfo = f"pkgname = {name}\npkgbase = {base}\npkgver = {version}\npkgdesc = fixture\n"
     buildinfo = (
         f"pkgname = {name}\npkgbase = {base}\npkgver = {version}\n"
-        "pkgbuild_sha256sum = deadbeef\npackager = Unit Test\nbuilddate = 1700000000\n"
+        f"pkgbuild_sha256sum = {pkgbuild_hash}\npackager = Unit Test\nbuilddate = 1760000000\n"
     )
     with tarfile.open(path, "w") as archive:
         for member, content in ((".PKGINFO", pkginfo), (".BUILDINFO", buildinfo)):
@@ -107,9 +119,21 @@ class ReviewTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def fixture(self, name="demo", base="demo", version="2-1", repo="chaotic-aur"):
+    def fixture(
+        self,
+        name="demo",
+        base="demo",
+        version="2-1",
+        repo="chaotic-aur",
+    ):
         archive = self.root / f"{name}-{version}-x86_64.pkg.tar"
-        digest = make_package(archive, name, base, version, ["usr/bin/demo", "usr/share/demo"])
+        digest = make_package(
+            archive,
+            name,
+            base,
+            version,
+            ["usr/bin/demo", "usr/share/demo"],
+        )
         sync = SyncPackage(repo, base, name, version, archive.name, digest)
         return sync, archive
 
@@ -122,6 +146,20 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "repository hash mismatch"):
             package_record(archive, bad)
 
+    def test_package_record_rejects_sync_identity_mismatch(self):
+        sync, archive = self.fixture()
+        mismatches = (
+            SyncPackage(sync.repo, "other", sync.name, sync.version, sync.filename, sync.sha256),
+            SyncPackage(sync.repo, sync.base, "other", sync.version, sync.filename, sync.sha256),
+            SyncPackage(sync.repo, sync.base, sync.name, "9-9", sync.filename, sync.sha256),
+            SyncPackage(sync.repo, sync.base, sync.name, sync.version, "other.pkg.tar", sync.sha256),
+        )
+        for mismatch in mismatches:
+            with self.subTest(sync=mismatch), self.assertRaisesRegex(
+                ReviewError, "repository identity mismatch"
+            ):
+                package_record(archive, mismatch)
+
     def test_source_unified_diff(self):
         old = snapshot("demo", "pkgver=1\n", "old")
         new = snapshot("demo", "pkgver=2\n", "new")
@@ -132,6 +170,64 @@ class ReviewTests(unittest.TestCase):
         self.assertIn(f"{ANSI_GREEN}+pkgver=2", difference)
         self.assertIn(ANSI_BOLD_CYAN, difference)
 
+    def test_untrusted_terminal_controls_are_rendered_inert(self):
+        hostile = "safe\x1b]52;c;clipboard\x07\rrewritten\u202eend\n"
+        rendered = sanitize_untrusted(hostile)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\x07", rendered)
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\u202e", rendered)
+        self.assertEqual(
+            rendered,
+            "safe<U+001B>]52;c;clipboard<U+0007><U+000D>rewritten<U+202E>end\n",
+        )
+
+    def test_source_diff_sanitizes_recipe_text_before_coloring(self):
+        old = snapshot("demo", "pkgver=1\n")
+        new = snapshot("demo", "pkgver=2\x1b[2J\n")
+        difference = source_diff(old, new)
+        self.assertNotIn("\x1b[2J", difference)
+        self.assertIn("<U+001B>[2J", difference)
+
+    def test_source_diff_ignores_chaotic_only_changes(self):
+        old = snapshot("demo", "pkgver=2\n", "old")
+        new = snapshot("demo", "pkgver=2\n", "new")
+        old["files"][".CI/config"] = {"text": "CI_PACKAGE_BUMP=1\n"}
+        new["files"][".CI/config"] = {"text": "CI_PACKAGE_BUMP=2\n"}
+        self.assertEqual(
+            source_diff(old, new),
+            "(no AUR recipe changes since the reviewed baseline)\n",
+        )
+
+    def test_recipe_paths_reject_traversal_and_controls(self):
+        self.assertEqual(validate_recipe_path(".CI/interfere.patch"), ".CI/interfere.patch")
+        for name in ("../escape", "/absolute", "dir\\file", "a/./b", "bad\x1bname"):
+            with self.subTest(name=name), self.assertRaises(ReviewError):
+                validate_recipe_path(name)
+
+    def test_chaotic_ci_controls_are_excluded_from_aur_diff(self):
+        item = self.fixture()
+        source = snapshot("demo", "pkgver=2\n")
+        source["files"][".CI/new-builder-control"] = {
+            "text": "enabled=true\n",
+            "size": 13,
+            "sha256": "fixture",
+        }
+        reports = []
+        overrides = []
+        reviewer = Reviewer(
+            self.config,
+            pacman=FakePacman({"demo": item}),
+            source=FakeSource({"demo": source}),
+            pager=reports.append,
+            prompt=lambda override: overrides.append(override) or False,
+        )
+        accepted, _ = reviewer.review(["demo"])
+        self.assertFalse(accepted)
+        self.assertEqual(overrides, [False])
+        self.assertNotIn("new-builder-control", reports[0])
+        self.assertNotIn(".CI", reports[0])
+
     def test_terminal_can_be_reopened_from_an_inherited_pty_descriptor(self):
         master, slave = pty.openpty()
         try:
@@ -140,6 +236,18 @@ class ReviewTests(unittest.TestCase):
             with open_review_terminal(user, [candidate]) as terminal:
                 terminal.write("terminal-probe\n")
             self.assertIn(b"terminal-probe", os.read(master, 1024))
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_review_user_can_be_inferred_from_terminal_owner(self):
+        master, slave = pty.openpty()
+        try:
+            candidate = f"/proc/{os.getpid()}/fd/{slave}"
+            self.assertEqual(
+                resolve_review_user("auto", [candidate]),
+                pwd.getpwuid(os.getuid()).pw_name,
+            )
         finally:
             os.close(master)
             os.close(slave)
@@ -202,8 +310,9 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("approved 2", message)
         self.assertEqual(prompts, [False])
         self.assertEqual(len(reports), 1)
-        self.assertIn("ARTIFACT: one", reports[0])
-        self.assertIn("ARTIFACT: two", reports[0])
+        self.assertIn("PACKAGE BASE: shared", reports[0])
+        self.assertNotIn("BUILD RECEIPT", reports[0])
+        self.assertNotIn("Transformation", reports[0])
         self.assertEqual(
             stat.S_IMODE((self.config.state_dir / "packages/one.json").stat().st_mode), 0o644
         )
@@ -215,7 +324,12 @@ class ReviewTests(unittest.TestCase):
 
         # A same-version rebuild is a new review because approval is hash-bound.
         rebuilt_hash = make_package(
-            one[1], "one", "shared", "2-1", ["usr/bin/demo", "usr/share/rebuilt"]
+            one[1],
+            "one",
+            "shared",
+            "2-1",
+            ["usr/bin/demo", "usr/share/rebuilt"],
+            "deadbeef",
         )
         rebuilt = SyncPackage("chaotic-aur", "shared", "one", "2-1", one[1].name, rebuilt_hash)
         reviewer.pacman.packages["one"] = (rebuilt, one[1])
@@ -244,7 +358,7 @@ class ReviewTests(unittest.TestCase):
             self.config,
             pacman=FakePacman({"demo": item}),
             source=FakeSource(error="offline"),
-            pager=lambda report: self.assertIn("SOURCE PROVENANCE UNAVAILABLE", report),
+            pager=lambda report: self.assertIn("AUR SOURCE DIFF UNAVAILABLE", report),
             prompt=lambda override: override_values.append(override) or True,
         )
         accepted, _ = reviewer.review(["demo"])
@@ -253,6 +367,39 @@ class ReviewTests(unittest.TestCase):
         state = json.loads((self.config.state_dir / "packages/demo.json").read_text())
         self.assertEqual(state["approval"], "source-override")
         self.assertEqual(state["archive_sha256"], item[0].sha256)
+
+    def test_source_override_is_an_exact_artifact_approval(self):
+        item = self.fixture()
+        reviewer = Reviewer(
+            self.config,
+            pacman=FakePacman({"demo": item}),
+            source=FakeSource(error="offline"),
+            pager=lambda report: None,
+            prompt=lambda override: True,
+        )
+        accepted, _ = reviewer.review(["demo"])
+        self.assertTrue(accepted)
+
+        reviewer.pager = lambda report: self.fail("approved artifact should not be shown again")
+        reviewer.prompt = lambda override: self.fail("approved artifact should not be prompted again")
+        accepted, message = reviewer.review(["demo"])
+        self.assertTrue(accepted)
+        self.assertIn("already approved", message)
+
+    def test_written_approval_preserves_source_baseline_shape(self):
+        item = self.fixture()
+        reviewer = Reviewer(
+            self.config,
+            pacman=FakePacman({"demo": item}),
+            source=FakeSource({"demo": snapshot("demo", "pkgver=2\n")}),
+            pager=lambda report: None,
+            prompt=lambda override: True,
+        )
+        reviewer.review(["demo"])
+        state = json.loads((self.config.state_dir / "packages/demo.json").read_text())
+        self.assertEqual(state["approval"], "reviewed")
+        self.assertIn("archive_sha256", state)
+        self.assertIn("source_snapshot_sha256", state)
 
     def test_bootstrap_only_selected_chaotic_packages(self):
         chaotic = self.fixture("chaotic", "chaotic", "1-1")
