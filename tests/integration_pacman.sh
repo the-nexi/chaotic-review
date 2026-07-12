@@ -53,7 +53,7 @@ gitlab_api = http://127.0.0.1:9
 pacman_config = $work/pacman.conf
 EOF
 
-cat >"$work/hooks/05-chaotic-review.hook" <<EOF
+cat >"$work/hooks/06-chaotic-review-integration.hook" <<EOF
 [Trigger]
 Operation = Install
 Operation = Upgrade
