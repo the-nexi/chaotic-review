@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+"""Installed launcher for chaotic-review."""
+
+import sys
+
+sys.path.insert(0, "/usr/lib/chaotic-review")
+
+from chaotic_review.cli import main  # noqa: E402
+
+
+raise SystemExit(main())

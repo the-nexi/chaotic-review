@@ -1,0 +1,19 @@
+pkgbase = chaotic-review
+	pkgdesc = Interactive review gate for Chaotic-AUR package build-recipe changes
+	pkgver = 0.2.0
+	pkgrel = 1
+	url = https://github.com/the-nexi/chaotic-review
+	arch = any
+	license = GPL-3.0-or-later
+	makedepends = git
+	depends = expac
+	depends = less
+	depends = libarchive
+	depends = pacman>=7
+	depends = python
+	depends = util-linux
+	backup = etc/chaotic-review.conf
+	source = git+https://github.com/the-nexi/chaotic-review.git#tag=0.2.0
+	b2sums = SKIP
+
+pkgname = chaotic-review
