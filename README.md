@@ -1,93 +1,188 @@
 # chaotic-review
 
-`chaotic-review` is an MVP review gate for Arch Linux systems using the
-[Chaotic-AUR](https://aur.chaotic.cx/) binary repository. It runs as an ALPM
-pre-transaction hook underneath both `pacman` and `paru`.
+`chaotic-review` is an interactive review gate for Arch Linux systems using
+the [Chaotic-AUR](https://aur.chaotic.cx/) binary repository. Before pacman
+installs or upgrades an unapproved Chaotic-AUR artifact, an ALPM
+pre-transaction hook shows the corresponding upstream AUR recipe changes and
+asks for an explicit decision.
 
-When an unapproved Chaotic-AUR artifact is about to be installed, the tool:
+## What it reviews
 
-1. Retrieves the corresponding recipe snapshot from Chaotic's PKGBUILD GitLab repository.
-2. Shows recipe, `.CI`, package metadata, build metadata, and payload-path diffs.
-3. Binds approval to the exact package archive SHA-256.
-4. Aborts the transaction if review is rejected or no interactive terminal is available.
+For every pending Chaotic-AUR package, `chaotic-review`:
 
-This is an experimental local project. It audits available provenance; it does
-not prove reproducibility or cryptographically establish that a published
-binary was produced from a particular source revision.
+1. Checks the downloaded archive against the SHA-256 recorded in pacman's sync
+   database and cross-checks its name, package base, version, and filename.
+2. Retrieves the recipe snapshot that preceded the artifact's build time from
+   Chaotic-AUR's PKGBUILDs repository.
+3. Removes Chaotic-specific `.CI/` controls from both snapshots.
+4. Shows only the upstream AUR recipe diff relative to the last approved
+   baseline and binds the
+   decision to the exact package archive SHA-256.
+
+Chaotic-specific PKGBUILD interference is deliberately outside the review. The
+tool does not display it, reconstruct it, verify it, or require the user to
+understand it. The review answers the same question as a local AUR upgrade:
+what changed in the package's upstream AUR recipe?
+
+This does **not** prove that the binary was produced from the displayed recipe,
+that it is reproducible, or that upstream source URLs are immutable. It also
+does not audit modifications performed later by Chaotic-AUR's infrastructure.
+If the upstream source snapshot cannot be retrieved, the exact artifact can
+only be accepted by typing `OVERRIDE`; that degraded approval is recorded.
 
 ## Requirements
 
-- Arch Linux with `pacman` 7 hook network controls
-- `expac`, `python`, `libarchive`, `util-linux`, and `less`
+- Arch Linux with pacman 7 or newer
 - A configured `[chaotic-aur]` repository
+- An interactive terminal reachable from the pacman or AUR-helper process
 
-## Install
+Runtime dependencies are declared by the package: `expac`, `less`,
+`libarchive`, `python`, and `util-linux`.
 
-Run as your normal desktop user:
+## Installation
+
+Once published in the AUR:
 
 ```sh
-./scripts/install.sh
+paru -S chaotic-review
 ```
 
-The installer detects the invoking user, installs the executable and hook,
-creates `/etc/chaotic-review.conf`, and bootstraps currently installed
-Chaotic-AUR artifacts. Existing configuration is preserved; use
-`--force-config` to regenerate it.
+To build the package from a release checkout:
 
-Continue updating normally:
+```sh
+makepkg -si
+```
+
+The package installs:
+
+- `/usr/bin/chaotic-review`
+- `/usr/lib/chaotic-review/`
+- `/usr/share/libalpm/hooks/05-chaotic-review.hook`
+- `/etc/chaotic-review.conf`
+- `/usr/lib/tmpfiles.d/chaotic-review.conf`
+
+Pacman preserves local changes to `/etc/chaotic-review.conf` during upgrades.
+The default `review_user = auto` selects the non-root owner of the recovered
+transaction terminal. Set an explicit local username if automatic detection is
+not appropriate for the machine.
+
+### Establish the initial baseline
+
+After installation, trust the exact Chaotic-AUR artifacts already installed on
+the system as the starting baseline:
+
+```sh
+sudo chaotic-review bootstrap
+```
+
+Bootstrap does not retrospectively audit those packages. It records their AUR
+source snapshots as the initial diff baseline and ensures subsequent artifacts
+require review.
+
+## Using the review gate
+
+Update normally with pacman or an AUR helper:
 
 ```sh
 paru -Syu
 ```
 
-Quit the report pager with `q`, then type `YES` to approve the displayed exact
-artifacts. If source provenance is unavailable, the explicit response is
-`OVERRIDE`.
+When a new Chaotic-AUR artifact is encountered:
 
-The ALPM hook explicitly recovers the invoking terminal from its process
-ancestry because `NeedsTargets` replaces hook stdin and some pacman frontends
-run hooks without a conventional controlling `/dev/tty`.
+1. Inspect the colored recipe diff in `less`.
+2. Quit the pager with `q`.
+3. Type `YES` to approve the displayed AUR recipe changes and exact artifacts.
+4. Type `OVERRIDE` only when the report says the AUR source diff is unavailable.
 
-Unified diffs are rendered with colored headers, hunks, additions, and removals
-through `less -R`.
+Any other response rejects the review and aborts the package transaction.
+Previously approved state is reused only when the candidate archive SHA-256 is
+identical, so same-version rebuilds are reviewed again.
+
+Recipe text and filenames are treated as hostile terminal input. Control and
+bidirectional-formatting characters are displayed visibly before project-owned
+color is added, `less` runs in secure mode, snapshot expansion is bounded, and
+recipe paths are normalized before temporary materialization.
 
 ## Commands
 
-```sh
+```text
 chaotic-review status
+    Show exact artifact approvals.
+
 sudo chaotic-review review-cached PACKAGE...
+    Review named candidates that have already been downloaded into pacman's cache.
+
 sudo chaotic-review reset PACKAGE...
-sudo chaotic-review bootstrap
+    Remove exact-artifact approvals for the named packages.
+
+sudo chaotic-review bootstrap [--force]
+    Trust installed Chaotic-AUR artifacts as the baseline. --force refreshes
+    existing bootstrap records.
 ```
 
-## Uninstall
+State is stored under `/var/lib/chaotic-review` and serialized under an
+exclusive process lock. Approval and AUR source-snapshot records remain
+available for inspection as JSON.
+
+## Recovery and troubleshooting
+
+If a package transaction cannot find the interactive terminal, run pacman
+directly from a local terminal rather than through a detached service or GUI.
+For a multi-user system, set `review_user` explicitly in
+`/etc/chaotic-review.conf`.
+
+If the upstream snapshot is unavailable, the report offers the explicit
+`OVERRIDE` path. Reject the transaction if the missing diff is unexpected;
+retry after connectivity or source history is restored.
+
+To temporarily disable the gate while repairing a system, override the packaged
+hook with the same filename in pacman's administrator hook directory:
 
 ```sh
-./scripts/uninstall.sh
+sudo ln -s /dev/null /etc/pacman.d/hooks/05-chaotic-review.hook
 ```
 
-The script interactively asks whether review state should be removed. For
-automation, use `--purge-state` or `--keep-state`; noninteractive operation
-preserves state by default.
+Remove that override to re-enable review:
+
+```sh
+sudo rm /etc/pacman.d/hooks/05-chaotic-review.hook
+```
+
+To uninstall the program while retaining its review history:
+
+```sh
+sudo pacman -Rns chaotic-review
+```
+
+Pacman does not remove `/var/lib/chaotic-review`; delete it explicitly only if
+the stored approvals and baselines are no longer wanted.
 
 ## Development
 
+Run the complete local verification suite on Arch Linux:
+
 ```sh
-make test
-make integration-test
 make check
 ```
 
-The integration test creates a disposable package repository and pacman
-database, then uses an unprivileged user namespace to exercise the real ALPM
-hook behavior without modifying the host package database.
+`make test` runs compilation and unit tests. `make integration-test` creates a
+disposable package repository and pacman database, then exercises the actual
+ALPM hook inside an unprivileged user namespace without modifying the host
+package database.
 
-## Layout
+The implementation is separated by responsibility:
 
-- `src/`: Python CLI and hook implementation
-- `config/`: generated system configuration template
-- `packaging/`: ALPM hook
-- `scripts/`: installation lifecycle
-- `tests/`: unit tests and sandboxed pacman integration test
+- `cli.py` contains review orchestration and commands.
+- `runtime.py` contains package, pacman, GitLab, terminal, and state boundaries.
+- `diff.py` filters Chaotic controls and safely renders AUR recipe diffs.
+- `models.py` contains shared configuration and value objects.
 
-No license has been selected yet.
+Release tags are numeric versions matching `pkgver` in `PKGBUILD` and `VERSION`
+in `src/chaotic_review/models.py`.
+
+## License
+
+Copyright © 2026 Oleg Chagaev.
+
+`chaotic-review` is free software licensed under the
+[GNU General Public License version 3 or later](LICENSE).
