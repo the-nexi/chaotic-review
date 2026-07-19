@@ -11,7 +11,9 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -29,8 +31,10 @@ from chaotic_review import (  # noqa: E402
 )
 from chaotic_review.diff import (  # noqa: E402
     sanitize_untrusted,
+    sanitize_untrusted_line,
     validate_recipe_path,
 )
+from chaotic_review.cli import main  # noqa: E402
 from chaotic_review.runtime import resolve_review_user  # noqa: E402
 
 
@@ -180,6 +184,13 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(
             rendered,
             "safe<U+001B>]52;c;clipboard<U+0007><U+000D>rewritten<U+202E>end\n",
+        )
+
+    def test_untrusted_single_line_controls_are_rendered_inert(self):
+        hostile = "first\nsecond\tvalue\x1b[2J\u202eend"
+        self.assertEqual(
+            sanitize_untrusted_line(hostile),
+            "first<U+000A>second<U+0009>value<U+001B>[2J<U+202E>end",
         )
 
     def test_source_diff_sanitizes_recipe_text_before_coloring(self):
@@ -367,6 +378,81 @@ class ReviewTests(unittest.TestCase):
         state = json.loads((self.config.state_dir / "packages/demo.json").read_text())
         self.assertEqual(state["approval"], "source-override")
         self.assertEqual(state["archive_sha256"], item[0].sha256)
+
+    def test_report_sanitizes_package_base_and_source_error(self):
+        hostile_base = "demo\x1b[2J"
+        item = self.fixture(base=hostile_base)
+        reports = []
+        reviewer = Reviewer(
+            self.config,
+            pacman=FakePacman({"demo": item}),
+            source=FakeSource(error="offline\x1b]52;c;clipboard\x07\nforged"),
+            pager=reports.append,
+            prompt=lambda override: False,
+        )
+
+        accepted, _ = reviewer.review(["demo"])
+
+        self.assertFalse(accepted)
+        self.assertNotIn("\x1b[2J", reports[0])
+        self.assertNotIn("\x1b]52", reports[0])
+        self.assertIn("demo<U+001B>[2J", reports[0])
+        self.assertIn("offline<U+001B>]52;c;clipboard<U+0007><U+000A>forged", reports[0])
+
+    def test_status_sanitizes_stored_fields(self):
+        packages = self.config.state_dir / "packages"
+        packages.mkdir(parents=True)
+        (packages / "demo.json").write_text(
+            json.dumps(
+                {
+                    "name": "demo\nforged",
+                    "version": "1\t2",
+                    "approval": "reviewed\x1b[2J",
+                    "archive_sha256": "abc\u202edef",
+                }
+            )
+        )
+
+        status = Reviewer(self.config).status()
+
+        self.assertNotIn("\x1b", status)
+        self.assertEqual(status.count("\n"), 1)
+        self.assertIn("demo<U+000A>forged", status)
+        self.assertIn("1<U+0009>2", status)
+        self.assertIn("reviewed<U+001B>[2J", status)
+        self.assertIn("abc<U+202E>def", status)
+
+    def test_main_sanitizes_warning_and_fatal_error_output(self):
+        warning_reviewer = mock.Mock()
+        warning_reviewer.bootstrap.return_value = (0, ["warning\x1b[2J\nforged"])
+        stderr = io.StringIO()
+        with (
+            mock.patch("chaotic_review.cli.Reviewer", return_value=warning_reviewer),
+            mock.patch("chaotic_review.cli.require_root"),
+            mock.patch("chaotic_review.cli.load_config", return_value=self.config),
+            redirect_stderr(stderr),
+        ):
+            self.assertEqual(main(["--config", str(self.root / "missing"), "bootstrap"]), 0)
+        self.assertEqual(
+            stderr.getvalue(),
+            "warning: warning<U+001B>[2J<U+000A>forged\n",
+        )
+
+        stderr = io.StringIO()
+        with (
+            mock.patch("chaotic_review.cli.Reviewer"),
+            mock.patch("chaotic_review.cli.load_config", return_value=self.config),
+            mock.patch(
+                "chaotic_review.cli.require_root",
+                side_effect=ReviewError("fatal\x1b]52;c;clipboard\x07\nforged"),
+            ),
+            redirect_stderr(stderr),
+        ):
+            self.assertEqual(main(["--config", str(self.root / "missing"), "bootstrap"]), 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "chaotic-review: fatal<U+001B>]52;c;clipboard<U+0007><U+000A>forged\n",
+        )
 
     def test_source_override_is_an_exact_artifact_approval(self):
         item = self.fixture()

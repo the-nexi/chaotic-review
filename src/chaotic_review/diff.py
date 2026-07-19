@@ -34,6 +34,17 @@ def sanitize_untrusted(text: str) -> str:
     return "".join(output)
 
 
+def sanitize_untrusted_line(text: str) -> str:
+    """Make attacker-controlled text safe for a single terminal line."""
+    output: list[str] = []
+    for character in text:
+        if unicodedata.category(character) in {"Cc", "Cf"}:
+            output.append(f"<U+{ord(character):04X}>")
+        else:
+            output.append(character)
+    return "".join(output)
+
+
 def validate_recipe_path(name: str) -> str:
     """Return a normalized safe recipe path or reject it."""
     if not name or "\\" in name or "\x00" in name:

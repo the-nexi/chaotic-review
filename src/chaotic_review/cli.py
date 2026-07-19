@@ -22,7 +22,7 @@ from .models import (
     SyncPackage,
     load_config,
 )
-from .diff import source_diff
+from .diff import sanitize_untrusted_line, source_diff
 from .runtime import (
     PACKAGE_NAME_RE,
     GitLabSource,
@@ -232,14 +232,18 @@ class Reviewer:
         for base in sorted(by_base):
             items = by_base[base]
             builddates = [int(first(record["buildinfo"], "builddate", "0")) for _, record in items]
-            reports.append(f"\nPACKAGE BASE: {base}\n" + "-" * 80 + "\n")
+            reports.append(
+                f"\nPACKAGE BASE: {sanitize_untrusted_line(base)}\n" + "-" * 80 + "\n"
+            )
             try:
                 snapshot = self.source.snapshot(base, max(builddates))
                 snapshots[base] = snapshot
                 reports.append(source_diff(read_json(self._source_path(base)), snapshot))
             except ReviewError as exc:
                 source_errors[base] = str(exc)
-                reports.append(f"AUR SOURCE DIFF UNAVAILABLE: {exc}\n")
+                reports.append(
+                    f"AUR SOURCE DIFF UNAVAILABLE: {sanitize_untrusted_line(str(exc))}\n"
+                )
 
         report = "".join(reports)
         self.pager(report)
@@ -271,10 +275,12 @@ class Reviewer:
             return "No Chaotic-AUR approvals or bootstrap state found."
         for path in sorted(self.packages_dir.glob("*.json")):
             record = read_json(path) or {}
+            name = sanitize_untrusted_line(str(record.get("name", path.stem)))
+            version = sanitize_untrusted_line(str(record.get("version", "?")))
+            approval = sanitize_untrusted_line(str(record.get("approval", "?")))
+            digest = sanitize_untrusted_line(str(record.get("archive_sha256", ""))[:12])
             rows.append(
-                f"{record.get('name', path.stem):35} {record.get('version', '?'):25} "
-                f"{record.get('approval', '?'):17} "
-                f"{str(record.get('archive_sha256', ''))[:12]}"
+                f"{name:35} {version:25} {approval:17} {digest}"
             )
         header = f"{'PACKAGE':35} {'VERSION':25} {'STATE':17} SHA256"
         return "\n".join([header, *rows]) if rows else "No package state found."
@@ -329,7 +335,10 @@ def main(argv: list[str] | None = None) -> int:
                 completed, warnings = reviewer.bootstrap(args.force)
                 print(f"Bootstrapped {completed} package artifact(s).")
                 for warning in warnings:
-                    print(f"warning: {warning}", file=sys.stderr)
+                    print(
+                        f"warning: {sanitize_untrusted_line(warning)}",
+                        file=sys.stderr,
+                    )
                 return 0
             if args.command == "reset":
                 print(f"Removed {reviewer.reset(args.packages)} approval(s).")
@@ -341,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
             print(message)
             return 0 if accepted else 1
     except ReviewError as exc:
-        print(f"chaotic-review: {exc}", file=sys.stderr)
+        print(f"chaotic-review: {sanitize_untrusted_line(str(exc))}", file=sys.stderr)
         return 1
 
 
