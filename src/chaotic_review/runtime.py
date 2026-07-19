@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .models import Config, ReviewError, SyncPackage
+from .models import REPO, Config, ReviewError, SyncPackage
 from .diff import validate_recipe_path
 
 MAX_SOURCE_ARCHIVE = 20 * 1024 * 1024
@@ -333,37 +333,60 @@ class GitLabSource:
 class Pacman:
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
+        self._chaotic_index: dict[str, SyncPackage] | None = None
 
     def _expac(self, *arguments: str) -> str:
         return run(["/usr/bin/expac", "--config", str(self.config.pacman_config), *arguments])
 
+    def chaotic_packages(self) -> dict[str, SyncPackage]:
+        if self._chaotic_index is not None:
+            return self._chaotic_index
+
+        repositories = run(
+            [
+                "/usr/bin/pacman-conf",
+                "--config",
+                str(self.config.pacman_config),
+                "--repo-list",
+            ]
+        ).splitlines()
+        if REPO not in repositories:
+            raise ReviewError(
+                f"repository {REPO} is not configured in {self.config.pacman_config}"
+            )
+
+        packages: dict[str, SyncPackage] = {}
+        output = self._expac("-S", "%r|%e|%n|%v|%f|%h")
+        for line in output.splitlines():
+            parts = line.split("|", 5)
+            if len(parts) != 6:
+                raise ReviewError(f"unexpected sync metadata: {line!r}")
+            package = SyncPackage(*parts)
+            if package.repo != REPO:
+                continue
+            if not PACKAGE_NAME_RE.fullmatch(package.name):
+                raise ReviewError(f"invalid package name in Chaotic metadata: {package.name!r}")
+            if package.name in packages:
+                raise ReviewError(f"duplicate Chaotic metadata for package: {package.name}")
+            packages[package.name] = package
+        self._chaotic_index = packages
+        return packages
+
     def sync_package(self, name: str) -> SyncPackage | None:
         if not PACKAGE_NAME_RE.fullmatch(name):
             raise ReviewError(f"invalid package name from transaction: {name!r}")
-        try:
-            value = self._expac("-S", "-1", "%r|%e|%n|%v|%f|%h", name).strip()
-        except ReviewError:
-            return None
-        parts = value.split("|", 5)
-        if len(parts) != 6:
-            raise ReviewError(f"unexpected sync metadata for {name}: {value!r}")
-        return SyncPackage(*parts)
+        return self.chaotic_packages().get(name)
 
     def installed_names(self) -> list[str]:
         return [line for line in self._expac("-Q", "%n").splitlines() if line]
 
     def installed_sync_packages(self) -> list[SyncPackage]:
         installed = set(self.installed_names())
-        selected: dict[str, SyncPackage] = {}
-        output = self._expac("-S", "%r|%e|%n|%v|%f|%h")
-        for line in output.splitlines():
-            parts = line.split("|", 5)
-            if len(parts) != 6:
-                continue
-            package = SyncPackage(*parts)
-            if package.name in installed and package.name not in selected:
-                selected[package.name] = package
-        return list(selected.values())
+        return [
+            package
+            for name, package in self.chaotic_packages().items()
+            if name in installed
+        ]
 
     def installed_version(self, name: str) -> str:
         return self._expac("-Q", "%v", name).strip()
@@ -372,12 +395,23 @@ class Pacman:
         output = run(["/usr/bin/pacman-conf", "--config", str(self.config.pacman_config), "CacheDir"])
         return [Path(line.strip()) for line in output.splitlines() if line.strip()]
 
-    def candidate_archive(self, sync: SyncPackage) -> Path:
+    def candidate_archive(self, sync: SyncPackage) -> Path | None:
         for directory in self.cache_dirs():
             path = directory / sync.filename
-            if path.is_file():
+            if path.is_file() and self._archive_sha256(path) == sync.sha256:
                 return path
-        raise ReviewError(f"downloaded candidate archive not found: {sync.filename}")
+        return None
+
+    @staticmethod
+    def _archive_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+        except OSError as exc:
+            raise ReviewError(f"could not hash candidate archive {path}: {exc}") from exc
+        return digest.hexdigest()
 
     def installed_archive(self, name: str, version: str) -> Path:
         matches: list[Path] = []

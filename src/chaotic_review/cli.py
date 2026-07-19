@@ -199,7 +199,7 @@ class Reviewer:
 
     def review(self, names: Iterable[str]) -> tuple[bool, str]:
         self.initialize_state()
-        sync_packages: list[SyncPackage] = []
+        sync_packages: list[tuple[SyncPackage, Path]] = []
         seen: set[str] = set()
         for name in names:
             name = name.strip()
@@ -207,14 +207,16 @@ class Reviewer:
                 continue
             seen.add(name)
             sync = self.pacman.sync_package(name)
-            if sync and sync.repo == REPO:
-                sync_packages.append(sync)
+            if not sync:
+                continue
+            archive = self.pacman.candidate_archive(sync)
+            if archive is not None:
+                sync_packages.append((sync, archive))
         if not sync_packages:
             return True, "no Chaotic-AUR transaction targets"
 
         pending: list[tuple[SyncPackage, dict]] = []
-        for sync in sync_packages:
-            archive = self.pacman.candidate_archive(sync)
+        for sync, archive in sync_packages:
             record = package_record(archive, sync)
             approved = read_json(self._package_path(sync.name))
             if approved and approved.get("archive_sha256") == record["archive_sha256"]:
@@ -235,6 +237,15 @@ class Reviewer:
             reports.append(
                 f"\nPACKAGE BASE: {sanitize_untrusted_line(base)}\n" + "-" * 80 + "\n"
             )
+            for sync, record in items:
+                reports.append(
+                    "PACKAGE: "
+                    f"{sanitize_untrusted_line(sync.name)}\n"
+                    f"VERSION: {sanitize_untrusted_line(sync.version)}\n"
+                    f"ARCHIVE: {sanitize_untrusted_line(sync.filename)}\n"
+                    "SHA256: "
+                    f"{sanitize_untrusted_line(str(record['archive_sha256']))}\n"
+                )
             try:
                 snapshot = self.source.snapshot(base, max(builddates))
                 snapshots[base] = snapshot

@@ -35,7 +35,7 @@ from chaotic_review.diff import (  # noqa: E402
     validate_recipe_path,
 )
 from chaotic_review.cli import main  # noqa: E402
-from chaotic_review.runtime import resolve_review_user  # noqa: E402
+from chaotic_review.runtime import Pacman, resolve_review_user  # noqa: E402
 
 
 def make_package(
@@ -85,7 +85,7 @@ class FakePacman:
 
     def sync_package(self, name):
         value = self.packages.get(name)
-        return value[0] if value else None
+        return value[0] if value and value[0].repo == "chaotic-aur" else None
 
     def candidate_archive(self, sync):
         return self.packages[sync.name][1]
@@ -94,7 +94,11 @@ class FakePacman:
         return list(self.installed)
 
     def installed_sync_packages(self):
-        return [self.packages[name][0] for name in self.installed]
+        return [
+            self.packages[name][0]
+            for name in self.installed
+            if self.packages[name][0].repo == "chaotic-aur"
+        ]
 
     def installed_version(self, name):
         return package_record(self.installed[name])["version"]
@@ -163,6 +167,62 @@ class ReviewTests(unittest.TestCase):
                 ReviewError, "repository identity mismatch"
             ):
                 package_record(archive, mismatch)
+
+    def test_pacman_selects_chaotic_metadata_instead_of_first_repository(self):
+        metadata = "\n".join(
+            (
+                "cachyos|demo|demo|3-1|demo-3-1-x86_64.pkg.tar.zst|" + "3" * 64,
+                "chaotic-aur|demo|demo|2-1|demo-2-1-x86_64.pkg.tar.zst|" + "2" * 64,
+            )
+        )
+
+        def command_result(command, **_kwargs):
+            if command[0] == "/usr/bin/pacman-conf":
+                return "cachyos\nchaotic-aur\n"
+            if command[0] == "/usr/bin/expac":
+                return metadata
+            self.fail(f"unexpected command: {command}")
+
+        with mock.patch("chaotic_review.runtime.run", side_effect=command_result):
+            selected = Pacman(self.config).sync_package("demo")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.repo, "chaotic-aur")
+        self.assertEqual(selected.version, "2-1")
+        self.assertEqual(selected.sha256, "2" * 64)
+
+    def test_pacman_repository_errors_fail_closed(self):
+        with mock.patch(
+            "chaotic_review.runtime.run", side_effect=ReviewError("expac database failure")
+        ):
+            with self.assertRaisesRegex(ReviewError, "database failure"):
+                Pacman(self.config).sync_package("demo")
+
+    def test_pacman_requires_configured_chaotic_repository(self):
+        with mock.patch("chaotic_review.runtime.run", return_value="core\nextra\n"):
+            with self.assertRaisesRegex(ReviewError, "is not configured"):
+                Pacman(self.config).sync_package("demo")
+
+    def test_candidate_archive_requires_exact_repository_hash(self):
+        sync, archive = self.fixture()
+        pacman = Pacman(self.config)
+        with mock.patch.object(pacman, "cache_dirs", return_value=[self.root]):
+            self.assertEqual(pacman.candidate_archive(sync), archive)
+
+            wrong = SyncPackage(
+                sync.repo, sync.base, sync.name, sync.version, sync.filename, "0" * 64
+            )
+            self.assertIsNone(pacman.candidate_archive(wrong))
+
+            missing = SyncPackage(
+                sync.repo,
+                sync.base,
+                sync.name,
+                sync.version,
+                "missing.pkg.tar.zst",
+                sync.sha256,
+            )
+            self.assertIsNone(pacman.candidate_archive(missing))
 
     def test_source_unified_diff(self):
         old = snapshot("demo", "pkgver=1\n", "old")
@@ -322,6 +382,10 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(prompts, [False])
         self.assertEqual(len(reports), 1)
         self.assertIn("PACKAGE BASE: shared", reports[0])
+        self.assertIn("PACKAGE: one", reports[0])
+        self.assertIn("VERSION: 2-1", reports[0])
+        self.assertIn(f"ARCHIVE: {one[0].filename}", reports[0])
+        self.assertIn(f"SHA256: {one[0].sha256}", reports[0])
         self.assertNotIn("BUILD RECEIPT", reports[0])
         self.assertNotIn("Transformation", reports[0])
         self.assertEqual(
@@ -516,7 +580,6 @@ class ReviewTests(unittest.TestCase):
         accepted, message = reviewer.review(["official"])
         self.assertTrue(accepted)
         self.assertIn("no Chaotic", message)
-
 
 if __name__ == "__main__":
     unittest.main()
