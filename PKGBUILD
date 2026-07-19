@@ -1,3 +1,5 @@
+# Maintainer: Oleg Chagaev <09.com51@gmail.com>
+
 pkgname=chaotic-review-git
 pkgver=0.2.0.r10.89cdfe9
 pkgrel=1
