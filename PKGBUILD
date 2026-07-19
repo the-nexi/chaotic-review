@@ -1,5 +1,5 @@
 pkgname=chaotic-review-git
-pkgver=0.2.0.r7.6fd1e24
+pkgver=0.2.0.r10.89cdfe9
 pkgrel=1
 pkgdesc="Interactive review gate for Chaotic-AUR package build-recipe changes"
 arch=('any')
