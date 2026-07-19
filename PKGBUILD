@@ -1,5 +1,5 @@
-pkgname=chaotic-review
-pkgver=0.2.0
+pkgname=chaotic-review-git
+pkgver=0.2.0.r7.6fd1e24
 pkgrel=1
 pkgdesc="Interactive review gate for Chaotic-AUR package build-recipe changes"
 arch=('any')
@@ -7,12 +7,24 @@ url="https://github.com/the-nexi/chaotic-review"
 license=('GPL-3.0-or-later')
 depends=('expac' 'less' 'libarchive' 'pacman>=7' 'python' 'util-linux')
 makedepends=('git')
+provides=("chaotic-review=$pkgver")
+conflicts=('chaotic-review')
 backup=('etc/chaotic-review.conf')
-source=("git+$url.git#tag=$pkgver")
+source=("chaotic-review::git+$url.git#branch=main")
 b2sums=('SKIP')
 
+pkgver() {
+    cd chaotic-review
+
+    local version
+    version=$(sed -n 's/^VERSION = "\([^"]*\)"$/\1/p' src/chaotic_review/models.py)
+    printf "%s.r%s.%s" "$version" \
+        "$(git rev-list --count HEAD)" \
+        "$(git rev-parse --short=7 HEAD)"
+}
+
 package() {
-    cd "$pkgname"
+    cd chaotic-review
 
     install -d "$pkgdir/usr/lib/chaotic-review/chaotic_review"
     install -m644 src/chaotic_review/*.py \
