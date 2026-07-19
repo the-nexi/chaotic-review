@@ -14,4 +14,3 @@ Depends = libarchive
 Depends = util-linux
 NeedsTargets
 AbortOnFail
-NetworkAccess = allowed
