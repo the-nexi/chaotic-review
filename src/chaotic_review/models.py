@@ -12,7 +12,7 @@ DEFAULT_STATE = Path("/var/lib/chaotic-review")
 DEFAULT_PROJECT = "54867625"
 DEFAULT_API = "https://gitlab.com/api/v4"
 REPO = "chaotic-aur"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 
 class ReviewError(RuntimeError):
